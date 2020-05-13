@@ -1,0 +1,910 @@
+---
+title: "MA429_SummativeProject"
+author: '33815'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T)
+knitr::opts_chunk$set(comment = NA)
+knitr::opts_chunk$set(dpi=300,fig.width=5)
+setwd('D:/Data File/Graduate-LSE/MA429 Data Mining/Summative Project')
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(caret) # machie learning
+library(corrplot) # correlation plot
+library(GGally) # pair plot
+library(caretEnsemble) # Stacking
+```
+
+## Loading and Merging Data
+Kaggle has divided the data into training and testing set for us then we do not need to manually do that, while in order to conduct the preliminary analysis and preprocessing, we should merge them together and redivide it into the original training and testing set before modelling in order to satisfy the submission requirements. Both 
+
+```{r,eval=F}
+train <- fread('Housing Data/train.csv',stringsAsFactors = F)
+test <- fread('Housing Data/test.csv',stringsAsFactors = F)
+train_idx <- train$Id # extract the training set index
+test_idx <- test$Id # extract the testing set index
+all <- rbind(train[,-1],test[,-1],fill = T) #testing set does not contain SalePrice Column
+```
+
+```{r}
+# The number of string type cols
+sum(sapply(all,is.character))
+# The number of int type cols
+sum(sapply(all,is.integer))
+# check if the sum of them match the total number of cols
+sum(sapply(all,is.character)) + sum(sapply(all,is.integer)) == dim(all)[2]
+```
+
+## Data Cleaning
+
+```{r}
+# find the cols that contain missing values
+NAcols <- which(colSums(is.na(all[,-'SalePrice'])) > 0)
+length(NAcols)
+round(colSums(apply(all[,..NAcols],MARGIN = 2,is.na))/dim(all)[1],4) #the .. signals to data.table to look for global variable 
+```
+
+### Data Imputation and Transformation
+
+LandContour: Flatness of the property, assume Near Flat/Level unless Depression are warranted 
+```{r}
+all$LandContour <- as.integer(factor(all$LandContour,levels = c('Low','HLS','Bnk','Lvl'),ordered=T))
+```
+
+Utilities:Type of utilities available, assume All public Utilities (E,G,W,& S) unless Electricity only are warranted ,2 NA
+
+```{r}
+summary(as.factor(all$Utilities))
+all$Utilities <- as.integer(factor(all$Utilities,levels = c('ELO','NoSeWa','NoSewr','AllPub'),ordered=T))
+all$Utilities[which(is.na(all$Utilities))]=4#since only 1 of 2917 is 1 and others are all 4
+```
+
+LandSlope: Slope of property, assume Gentle slope unless Severe Slope are warranted
+
+```{r}
+all$LandSlope <- as.integer(factor(all$LandSlope,levels = c('Sev','Mod','Gtl'),ordered=T))
+```
+
+ExterQual: Evaluates the quality of the material on the exterior, assume Excellent unless Poor are warranted
+```{r}
+all$ExterQual <- as.integer(factor(all$ExterQual,levels = c('Po','Fa','TA','Gd','Ex'),ordered=T))
+```
+
+ExterCond: Evaluates the present condition of the material on the exterior, assume Excellent unless Poor are warranted
+```{r}
+all$ExterCond <- as.integer(factor(all$ExterCond,levels = c('Po','Fa','TA','Gd','Ex'),ordered=T))
+```
+
+BsmtQual: Evaluates the height of the basement ,assume Excellent (100+ inches) unless No Basement are warranted
+```{r}
+all$BsmtQual[which(is.na(all$BsmtQual))]='None'
+all$BsmtQual <- as.integer(factor(all$BsmtQual,levels = c('None','Po','Fa','TA','Gd','Ex'),ordered=T))
+```
+
+BsmtCond: Evaluates the general condition of the basement,assume Excellent unless No Basement are warranted
+```{r}
+all$BsmtCond[which(is.na(all$BsmtCond))]='None'
+all$BsmtCond <- as.integer(factor(all$BsmtCond,levels = c('None','Po','Fa','TA','Gd','Ex'),ordered=T))
+```
+
+BsmtExposure: Refers to walkout or garden level walls,assume Good unless No Basement are warranted
+```{r}
+all$BsmtExposure[which(is.na(all$BsmtExposure))]='None'
+all$BsmtExposure <- as.integer(factor(all$BsmtExposure,levels = c('None','No','Mn','Av','Gd'),ordered=T))
+```
+
+BsmtFinType1: Rating of basement finished area, assume Good Living Quarters are warrannted
+```{r}
+all$BsmtFinType1[which(is.na(all$BsmtFinType1))]='None'
+all$BsmtFinType1 <- as.integer(factor(all$BsmtFinType1,levels = c('None','Unf','LwQ','Rec','BLQ','ALQ','GLQ'),ordered=T))
+```
+
+BsmtFinType2: Rating of basement finished area, assume Good Living Quarters are warrannted
+```{r}
+all$BsmtFinType2[which(is.na(all$BsmtFinType2))]='None'
+all$BsmtFinType2 <- as.integer(factor(all$BsmtFinType2,levels = c('None','Unf','LwQ','Rec','BLQ','ALQ','GLQ'),ordered=T))
+```
+
+HeatingQC: Heating quality and condition,assume Excellent is warranted
+```{r}
+all$HeatingQC <- as.integer(factor(all$HeatingQC,levels = c('Po','Fa','TA','Gd','Ex'),ordered=T))
+```
+
+MSZoning has only 4 missing and it has mostly 'RL', we can set that for missing value
+```{r}
+summary(as.factor(all$MSZoning))
+all$MSZoning[which(is.na(all$MSZoning))]='RL'
+all$MSZoning <- factor(all$MSZoning)
+```
+
+LotFrontage has 486 missing, Since the area of each street connected to the house property most likely have a similar area to other houses in its neighborhood , we can fill in missing values by the mean LotFrontage of the neighborhood.
+```{r}
+all$Neighborhood <- factor(all$Neighborhood)
+all[train_idx,mean(LotFrontage,na.rm = T),by = Neighborhood]
+impute.mean <- function(x) replace(x, is.na(x), mean(x, na.rm = TRUE))
+# Impute value in training set and testing set separately to avoid data lekage
+all[train_idx, LotFrontage := impute.mean(LotFrontage),by = Neighborhood]
+all[test_idx, LotFrontage := impute.mean(LotFrontage),by = Neighborhood]
+```
+
+Alley:data discription says NA means "no alley access"
+```{r}
+all$Alley[which(is.na(all$Alley))]='None'
+```
+
+Exterior1st,Exterior2nd has 1 NA and has mostly 'VinylSd', we can set that for the missing value.
+```{r}
+which(is.na(all$Exterior1st))
+summary(as.factor(all$Exterior1st))
+all$Exterior1st[which(is.na(all$Exterior1st))]='VinylSd'
+all$Exterior2nd[which(is.na(all$Exterior2nd))]='VinylSd'
+```
+
+MasVnrType,MasVnrArea has 24 NA and this most likely means no masonry veneer for these houses. We can fill 0 for the area and None for the type.
+```{r}
+summary(as.factor(all$MasVnrType))
+all$MasVnrType[which(is.na(all$MasVnrType))]='None'
+all$MasVnrArea[which(is.na(all$MasVnrArea))]=0
+```
+
+
+BsmtFinSF1,BsmtFinSF2,BsmtUnfSF,TotalBsmtSF,BsmtFullBath BsmtHalfBath fill missing with 0 because it does not have a basement
+```{r}
+which(is.na(all$BsmtFinSF1))
+all$BsmtFinSF1[which(is.na(all$BsmtFinSF1))]=0
+all$BsmtFinSF2[which(is.na(all$BsmtFinSF2))]=0
+all$BsmtUnfSF[which(is.na(all$BsmtUnfSF))]=0
+all$TotalBsmtSF[which(is.na(all$TotalBsmtSF))]=0
+all$BsmtFullBath[which(is.na(all$BsmtFullBath))]=0
+all$BsmtHalfBath[which(is.na(all$BsmtHalfBath))]=0
+
+```
+
+
+Electrical has only 1 NA value. Since it has mostly 'SBrkr', we can set that for the missing value.
+```{r}
+which(is.na(all$Electrical))
+summary(as.factor(all$Electrical))
+all$Electrical[which(is.na(all$Electrical))]='SBrkr'
+```
+---------------------------------------------------------------------
+KitchenQual (only 1 NA)
+```{r}
+all[is.na(KitchenQual),'KitchenQual'] <- 'TA' #impute with typical value
+all$KitchenQual <- as.integer(factor(all$KitchenQual,levels = c("Fa","TA","Gd","Ex"),ordered = T)) #ordinal levels can be encoded as numeric to keep the ordinal information
+```
+
+Functional (Home functionality, Assume typical unless deductions are warranted, 2 NAs)
+```{r}
+all[is.na(Functional),'Functional'] <- 'Typ'
+all$Functional <- as.integer(factor(all$Functional,levels = c("Sev","Maj2","Maj1","Mod","Min2","Min1","Typ"),ordered = T)) # ordinal levels
+```
+
+FireplaceQu (NA means no fireplaces)
+```{r}
+all[is.na(FireplaceQu),'FireplaceQu'] <- 'None'
+all$FireplaceQu <- as.integer(factor(all$FireplaceQu,levels = c("None","Po","Fa","TA","Gd","Ex"),ordered = T))
+```
+
+GarageType (NA means No Garage), if No Garage, NA in GarageFinish, GarageQual and GarageCond can all be imputed as 'None'(NA encoding); GarageCars, GarageArea can be imputed as 0; GarageYrBlt can be imputed as the YearBuilt since we may use difference between YearSold and YearBuilt to indicate the age of houses.
+```{r}
+all[is.na(GarageType),'GarageType'] <- 'None'
+all$GarageType <- factor(all$GarageType)
+
+# ordinal factor
+all[is.na(GarageFinish),c('GarageFinish','GarageQual','GarageCond')] <- 'None'
+all$GarageFinish <- as.integer(factor(all$GarageFinish,levels = c('None','Unf','RFn','Fin'),ordered = T))
+all$GarageQual <- as.integer(factor(all$GarageQual,levels = c("None","Po","Fa","TA","Gd","Ex"),ordered = T))
+all$GarageCond <- as.integer(factor(all$GarageCond,levels = c("None","Po","Fa","TA","Gd","Ex"),ordered = T))
+
+# numeric variables 
+all[is.na(GarageCars),c('GarageCars','GarageArea')] <- 0
+
+# Year Imputation
+all[is.na(GarageYrBlt),'GarageYrBlt'] <- all[is.na(GarageYrBlt),'YearBuilt']
+```
+
+
+PoolQC (NA means No Pool)
+```{r}
+all[is.na(PoolQC),'PoolQC'] <- 'None'
+all$PoolQC <- as.integer(factor(all$PoolQC,levels = c("None","Fa","Gd","Ex"),ordered = T))
+```
+
+Fence (NA means No Fence,ordinal)
+```{r}
+all[is.na(Fence),'Fence'] <- 'None'
+all$Fence <- as.integer(factor(all$Fence,levels = c('None','MnWw','GdWo','MnPrv','GdPrv'),ordered = T))
+```
+
+MiscFeature (NA means do not contain other Miscellaneous feature) 
+```{r}
+all[is.na(MiscFeature),'MiscFeature'] <- 'None'
+all$MiscFeature <- factor(all$MiscFeature)
+```
+
+SaleType (only 1 NA, imputed with the most common type)
+```{r}
+all[is.na(SaleType),'SaleType'] <- 'WD'
+all$SaleType <- factor(all$SaleType)
+```
+
+Check Missing Columns again
+
+```{r}
+which(colSums(is.na(all[,-'SalePrice'])) > 0)
+```
+
+### Factor Transformation for other Vairables
+
+Some of the charater variables have been transformed to integer or factor type, in this step, we need to transform the remaining variables with charater type. 
+```{r}
+names(all[,which(sapply(all,is.character))]) #return character variable names, all of them do not contain ordinal information according to documentation
+all <- all %>% mutate_if(is.character, as.factor) %>% mutate_if(is.integer, as.numeric) # unify to numeric
+
+# MSSubClass should be of factor type
+all$MSSubClass <- as.factor(all$MSSubClass)
+
+# The number of factor type cols
+sum(sapply(all,is.factor))
+# The number of num type cols
+sum(sapply(all,is.numeric))
+# check if the sum of them match the total number of cols
+sum(sapply(all,is.factor)) + sum(sapply(all,is.numeric)) == dim(all)[2]
+
+# for convenience, change back to data table
+all <- data.table(all)
+# Change column name
+colnames(all)[43] <- 'F1stFlrSF'
+colnames(all)[44] <- 'F2ndFlrSF'
+```
+
+## Exploratory Data Analysis
+
+### Explore Target Variabels
+
+```{r,warning=F, dpi=300}
+ggplot(all,aes(x = SalePrice))  + geom_histogram(aes(y=..density..),color = 'black',fill = 'aquamarine',alpha = 0.5) + geom_density(aes(y=..density..))
+
+ggplot(all,aes(x = SalePrice))  + geom_histogram(aes(y=..density..),color = 'black',fill = 'aquamarine',alpha = 0.5) + geom_density(aes(y=..density..)) + scale_x_continuous(trans='log')
+```
+
+```{r}
+qqnorm(all$SalePrice)
+qqline(all$SalePrice)
+```
+
+### Correlation Plot for Numerical Variables
+
+```{r, fig.retina = 2}
+numCol <- which(sapply(all,is.numeric))
+M <-cor(all[,..numCol],use = 'pairwise.complete.obs')
+highCor <- names(which(sapply(M[,55], function(x) abs(x)>0.5))) # only select the highly correlated coloumns for plotting
+corrplot.mixed(M[highCor,highCor],tl.col="black",tl.pos = "lt",upper = "color", number.cex = .4, tl.cex = .7)
+```
+
+
+```{r,cache=T,eval=F}
+# Quality Vairables 
+QualCol <- grep('.*Qual.*',names(all))
+ggpairs(all[,c(..QualCol,80)],
+        lower = list(continuous = wrap("points", color = "black", alpha = 0.1))
+        ,diag = list(continuous = wrap("densityDiag",  color = "blue", alpha = 0.5))
+        ,axisLabels = 'none',switch = 'y') # 80 is SalePrice
+```
+
+```{r,cache=T,eval=F}
+# Size Vairables 
+SFCol <- c('GrLivArea','TotalBsmtSF','BsmtFinSF1','F1stFlrSF','F2ndFlrSF','GarageArea')
+ggpairs(all[,c(..SFCol,'SalePrice')]
+        ,lower = list(continuous = wrap("points", color = "black", alpha = 0.1))
+        ,diag = list(continuous = wrap("densityDiag",  color = "blue", alpha = 0.5))
+        ,axisLabels = 'none',switch = 'y')
+```
+
+### Saleprice vs OverallQual
+
+```{r, fig.width=7}
+ggplot(all,aes(x=as.factor(OverallQual),y=SalePrice))+ geom_boxplot(aes(fill = as.factor(OverallQual)))
+```
+
+
+### GrLivArea vs SalePrice
+
+```{r}
+ggplot(all,aes(x = GrLivArea, y = SalePrice)) + geom_jitter(alpha = 0.3,color = 'blue') + geom_smooth(method = 'lm',color = 'black',se = F) +  geom_text(aes(label = ifelse(SalePrice < 200000 & GrLivArea > 4000, rownames(all), '')),size = 3,hjust = 1,vjust = 1)
+```
+
+It is very clear that there are 2 outliers that we should remove.
+```{r}
+# remove outliers
+all <- all[-c(524,1299),]
+# reset train index and test index
+train_idx = seq(1,1458)
+test_idx = seq(1459,2917)
+```
+
+### Age
+```{r}
+#all[,median(SalePrice,na.rm = T),by = sort(YearBuilt)]
+ggplot(all,aes(x = YrSold - YearBuilt, y = SalePrice)) + geom_jitter(alpha = 0.3,color = 'blue') + geom_smooth(color = 'black',se = F) 
+#stat_summary(fun.y="median", geom="point",na.rm = T)
+```
+
+
+### Simple Random Forest for Finding Features Importance
+
+Though correlation matrix can reflect the importance of predictors in terms of their correlation with target variables, while there are two main defects doing so,
+
+1. Pearson Correlation can only reflect the linear correlation, while many the relations among variables are always nonlinear in practice.
+
+2. Pearson Correlation can only be calcultaed among the numerical variables, and thus we need to apply other methods to figure out the importances of categorical variables.
+
+Tree-based methods can be implemented to tackle this task, e.g., random forest can use permutation method to see how the loss function vaires before and after each variable permutation (takes the idea of permutation test). Also, random Forest can find more complex relations among variables because it grows deeper tree compared with boosting tree methods [reference], because we just want to have a glance of the variable imporatnce but not get the best prediction, we do not need to conduct an elaborate tuning in this step. 
+#original data without feature engineering,
+```{r,cache=T,eval=T}
+myControl <- trainControl(
+method = "cv",
+number = 5,
+verboseIter = TRUE
+)
+
+
+set.seed(123)
+
+rf <- train(
+y = log(all$SalePrice[train_idx]),
+x = all[train_idx,-'SalePrice'], # if using formula, factor variables will be transformed to dummy vairables
+method = "ranger",
+num.trees = 100,
+importance = 'permutation',
+respect.unordered.factors=TRUE, #factor vairables are unordered
+seed = 123, # for reproducibility 
+trControl = myControl
+)
+min(rf$results$RMSE)
+```
+
+```{r}
+numCol <- which(sapply(all,is.numeric))
+numName = names(numCol)
+featureImp = varImp(rf)$importance
+factorName = setdiff(names(all[,-'SalePrice']),numName) # get the categorical variables name
+catImp = featureImp[factorName,,drop = F]
+catImp[order(catImp$Overall,decreasing = T),,drop = F]
+```
+
+From the splitting algorithm’s point of view, all the dummy variables are independent. One-Hot encoding thus hurts the performance of tree-based models.
+
+According to the importance of categorical variables given by the above random forest, the top 3 important categorical vairables are Neighborhood, MSSubClass and GarageType.
+
+### Neighborhood vs SalePrice
+
+```{r}
+# for sorting the boxplot
+fac <- with(all[train_idx,], reorder(Neighborhood, SalePrice, median, order = T))
+all$Neighborhood <- factor(all$Neighborhood, levels = levels(fac))
+
+ggplot(all,aes(x = Neighborhood, y = SalePrice)) + geom_boxplot(aes(fill = Neighborhood)) + theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(angle = 60,hjust = 1,vjust = 1)) + theme(legend.position="none") + geom_vline(xintercept = c(12,22), linetype = "dashed",color = 'red')
+```
+
+We can see that the SalePrice distribution of different neighbourhoods are quite different and this is reasonable since location is always one of the most important factor of houses price. Specifically, different neighbourhoods can be roughly clustered into 3 groups considering their houses SalePrice distribution and this can be possible new features substituting for neighbourhood and we'll try this in the next section.
+
+### MSSubClass vs SalePrice
+```{r}
+fac <- with(all[train_idx,], reorder(MSSubClass, SalePrice, median, order = T))
+all$MSSubClass <- factor(all$MSSubClass, levels = levels(fac))
+
+ggplot(all,aes(x = MSSubClass, y = SalePrice)) + geom_boxplot(aes(fill = MSSubClass)) + theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(angle = 60,hjust = 1,vjust = 1)) + theme(legend.position="none") 
+```
+
+### GarageType vs SalePrice
+
+```{r}
+fac <- with(all[train_idx,], reorder(GarageType, SalePrice, median, order = T))
+all$GarageType <- factor(all$GarageType, levels = levels(fac))
+
+ggplot(all,aes(x = GarageType, y = SalePrice)) + geom_boxplot(aes(fill = GarageType)) + theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(angle = 60,hjust = 1,vjust = 1)) + theme(legend.position="none") 
+```
+
+It is reasonable to see that a house with a built in garage is generally much more expensive than a house without a garage.
+
+## Features Engineering
+
+### Transform All the Year-related Variables to Age
+
+Time series data is hard to analyse (autocorrelation, time trend etc.) and may need to conduct analysis separtely. If we do not want to contain time series data in the normal machine learning model, we can transform time series data into meaningfully numerical data, for example, we can use the difference between `YearSold` and other year values to represent the building age. In this case, it is reasonable to do that as we have seen the negative correlation between age and `SalePrice` in the last section (EDA).
+
+```{r}
+all <- all %>% mutate(YearBuilt = YrSold - YearBuilt,
+                      YearRemodAdd = YrSold - YearRemodAdd,
+                      GarageYrBlt = YrSold - GarageYrBlt)
+all$YrSold <- NULL
+all$MoSold <- NULL
+```
+
+### Bstm: all$TotalBsmtSF + all$BsmtQual
+
+Use correlation coefficients as the combination coefficients
+
+```{r}
+all <- data.table(all)
+all[,TotalBsmtQual:= 0.735 * TotalBsmtSF * BsmtQual + 0.452 * BsmtFinType1 * BsmtFinSF1 + 0.016 * BsmtFinType2 * BsmtFinSF2 + 0.222 * BsmtUnfSF][,c('TotalBsmtSF','BsmtQual','BsmtFinType1','BsmtFinSF1','BsmtFinType2','BsmtFinSF2','BsmtUnfSF'):= NULL]
+```
+
+---------------------------------------------------------------------
+### split Neighborhood into 3 ordinal classes
+From the picture of Neighborhood vs SalePrice, we can clearly see the neighborhood can be split into 3 classes seperated by red dash lines
+```{r,eval=F}
+
+if(FALSE)
+{
+
+all$NeighborRich[all$Neighborhood %in% c('StoneBr', 'NridgHt', 'NoRidge')==TRUE] <- 2
+all$NeighborRich[all$Neighborhood %in% c('SawyerW', 'NWAmes', 'Gilbert', 'Blmngtn', 'CollgCr', 'Crawfor','ClearCr','Somerst','Veenker','Timber')==TRUE] <- 1
+all$NeighborRich[all$Neighborhood %in% c('MeadowV', 'IDOTRR', 'BrDale','BrkSide','Edwards','OldTown','Sawyer','Blueste','SWISU','NPkVill','NAmes','Mitchel')==TRUE] <- 0
+
+all$Neighborhood <- NULL
+}
+```
+
+
+### aggregate total bathroom
+There are 4 bathroom features. Individually, these are not very important. However,if we aggregate them into one feature, it may become a strong one.
+Since half-bath does not possess all the facilities, we multiple 0.5 when aggregating.
+```{r}
+all$TotalBathrooms <- all$FullBath + (all$HalfBath*0.5) + all$BsmtFullBath + (all$BsmtHalfBath*0.5)
+all$FullBath <- NULL
+all$BsmtFullBath <- NULL
+all$HalfBath <- NULL
+all$BsmtHalfBath <-NULL
+```
+
+###FloorSF
+```{r}
+all$TotalFlrSF <- all$F1stFlrSF+all$F2ndFlrSF
+all$F1stFlrSF<-NULL
+all$F2ndFlrSF<-NULL
+```
+
+### Pool 
+Since most houses do not have a pool thus two features poolQC and poolarea are overkilled. So we just simplified to a boolean variable (if the house has a pool)
+
+```{r}
+all$hasPool[all$PoolQC==1] <- 0
+all$hasPool[!all$PoolQC==1] <- 1
+all$PoolArea<-NULL
+all$PoolQC<-NULL
+```
+
+
+#Random Forest
+```{r,cache=T,eval=F}
+myControl <- trainControl(
+method = "cv",
+number = 5,
+verboseIter = TRUE
+)
+
+
+set.seed(123)
+
+rf <- train(
+y = log(all$SalePrice[train_idx]),
+x = all[train_idx,-'SalePrice'], # if using formula, factor variables will be transformed to dummy vairables
+method = "ranger",
+num.trees = 100,
+importance = 'permutation',
+respect.unordered.factors=TRUE, #factor vairables are unordered
+seed = 123, # for reproducibility 
+trControl = myControl
+)
+min(rf$results$RMSE)
+
+```
+
+#Lasso
+```{r,cache=T,eval=F}
+myControl <- trainControl(
+method = "cv",
+number = 5,
+verboseIter = TRUE
+)
+
+
+lassoGrid <- expand.grid(alpha = 1, lambda = seq(0.001,0.1,0.001))
+
+set.seed(123)
+lm <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "glmnet",
+tuneGrid = lassoGrid,
+seed = 123,
+trControl = myControl
+)
+min(lm$results$RMSE)
+```
+
+## Regression Modelling Techniques
+
+In this part, different regression methods were implemented with the features creating in the previous steps and their cross validation errors (RMSE) were compared. Hyperparameters of each model were tuned by adding the `tuneGrid` arguments when calling `train` function in caret pacakge. In order to maintain comparability and convenience of implementing later models ensemble, all the models used the same validation set.   
+
+```{r}
+# create the same folds and training comtrol
+set.seed(123)
+myFolds <- createFolds(all$SalePrice[train_idx], k = 10,returnTrain=T) # 10 folds cv
+
+myControl <- trainControl(
+verboseIter = TRUE,
+method = 'cv',
+index = myFolds
+)
+```
+
+### Elastic Net Regression (Combination of Ridge Regression and Lasso Regression)
+fraction：it refers to the ratio of the L1 norm of the coefficient vector, relative to the norm at the full LS solution
+```{r,eval=F}
+
+EnetGrid <- expand.grid(fraction=0.4, lambda = seq(0.001,0.01,0.001))
+
+set.seed(123)
+
+En <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "enet",
+tuneGrid = EnetGrid,
+preProcess = c('center','scale','zv'), # normalization and remove zero variance variables
+trControl = myControl
+)
+
+min(En$results$RMSE)
+```
+```{r,eval=F}
+plot(En)
+```
+
+
+
+```{r,eval=F}
+
+lmGrid <- expand.grid(alpha = seq(0,1,0.1), lambda = seq(0.001,0.01,0.001))
+
+set.seed(123)
+
+lm <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "glmnet",
+tuneGrid = lmGrid,
+preProcess = c('center','scale','zv'), # normalization and remove zero variance variables
+trControl = myControl
+)
+
+min(lm$results$RMSE)
+```
+
+```{r}
+qplot(x = log(all$SalePrice[train_idx]),y = predict(lm,all[train_idx]),alpha = 0.5) + geom_smooth(se = F,method = 'lm')
+plot(lm)
+```
+
+### Random Forest
+```{r,cache=T,eval=F}
+set.seed(123)
+
+rf <- train(
+y = log(all$SalePrice[train_idx]),
+x = all[train_idx,-'SalePrice'], # if using formula, factor variables will be transformed to dummy vairables
+method = "ranger",
+num.trees = 100,
+importance = 'permutation',
+respect.unordered.factors=TRUE, #factor vairables are unordered
+tuneLength = 10, # tuning the most important hyperparameter: mtry
+trControl = myControl
+)
+min(rf$results$RMSE)
+rf$results
+```
+
+```{r}
+plot(rf)
+```
+
+
+### Xgboost
+
+```{r,cache=T,eval=F}
+xgbGrid <- expand.grid(
+nrounds = 500, #iterations
+eta = c(0.1, 0.05, 0.01), # shrinkage, learning rate
+max_depth = c(2, 3, 4, 5), 
+gamma = 0, # Minimum loss reduction
+subsample = c(1,0.5), 
+colsample_bytree=1, #Subsample Ratio of Columns
+min_child_weight=c(2, 3,4,5) #Minimum sum of instance weight (hessian) needed in a child
+)
+
+set.seed(123)
+
+xgb <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "xgbTree",
+tuneGrid = xgbGrid,
+trControl = myControl
+)
+
+min(xgb$results$RMSE)
+```
+
+```{r}
+plot(xgb)
+```
+
+
+### SVM
+
+#### Linear Kernel
+
+```{r,eval=F}
+set.seed(123)
+
+svmGrid <- expand.grid(C = seq(0.05,0.5,0.05)) #tune cost
+
+svm_lk <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "svmLinear",
+preProcess = c('center','scale','zv'),
+tuneGrid = svmGrid,
+trControl = myControl
+)
+
+min(svm_lk$results$RMSE)
+```
+
+```{r}
+plot(svm_lk)
+```
+
+```{r,eval=F}
+set.seed(123)
+
+svmGrid <- expand.grid(sigma = c(0.05,0.1)
+                       ,C = seq(0.1,1,0.1)) #tune cost
+
+svm_rad <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "svmRadial",
+preProcess = c('center','scale','zv'),
+tuneGrid = svmGrid,
+trControl = myControl
+)
+
+min(svm_rad$results$RMSE)
+```
+
+### Neural Network
+```{r,eval=F}
+dummy_all <- data.frame(model.matrix(~.-1,all))
+```
+
+
+```{r,eval=F}
+set.seed(123)
+
+nnGrid <- expand.grid(layer1  = 10
+                      ,layer2 = 10
+                      ,layer3 = 10) #tune cost
+
+nn <- train(
+log(SalePrice) ~.,
+dummy_all[train_idx,],
+method = "nnet",
+preProcess = c('center','scale','zv'),
+#algorithm = 'backprop',
+#learningrate = 0.001,
+trControl = myControl
+)
+
+min(nn$results$RMSE)
+# not included
+```
+
+```{r}
+ggplot(varImp(xgb),top = 10)
+ggplot(varImp(lm),top = 10)
+ggplot(varImp(svm_lk),top = 10)
+ggplot(varImp(rf),top = 10)
+```
+
+## Stacking
+
+### Average Models
+```{r,eval=F}
+rmse <- function(pred,actual) {
+        rmse = ifelse(length(pred) == length(actual),
+                      sqrt(mean((pred - actual)^2)),
+                      NA)
+        return(rmse)
+}
+
+lm_pred <- predict(lm,newdata = all[train_idx,])
+xgb_pred <- predict(xgb,newdata = all[train_idx,])
+rf_pred <- predict(rf,newdata = all[train_idx,])
+pred <- (lm_pred + xgb_pred)/2
+
+rmse(pred,log(all$SalePrice[train_idx]))
+```
+
+---------------------------------------------------------------------
+Stacking using own code
+
+```{r,eval=F}
+myControl <- trainControl(
+verboseIter = TRUE,
+method = 'cv',
+savePredictions = 'all',
+index = myFolds
+)
+
+lmGrid <- expand.grid(alpha = 0.4, lambda = 0.008)
+
+lm_final  <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "glmnet",
+tuneGrid = lmGrid,
+preProcess = c('center','scale','zv'), # normalization and remove zero variance variables
+trControl = myControl
+)
+```
+
+```{r,eval=F}
+meta_y1 = data.frame(matrix(ncol=10, nrow=length(test_idx)))
+
+lmGrid <- expand.grid(alpha = 0.4, lambda = 0.008)
+for (i in 1:length(myFolds)){
+        folds = myFolds[[i]]
+        lm <- train(
+                log(SalePrice) ~ .,
+                all[folds,],
+                method = 'glmnet',
+                tuneGrid = lmGrid,
+                preProcess = c('center','scale','zv')
+                )
+        meta_y1[,i] <- predict(lm,newdata = all[test_idx,])
+}
+
+meta_y1 <- rowMeans(meta_y1)
+```
+
+```{r,eval=F}
+myControl <- trainControl(
+verboseIter = TRUE,
+method = 'cv',
+savePredictions = 'all',
+index = myFolds
+)
+
+xgbGrid <- expand.grid(nrounds = 500, eta = 0.1,max_depth = 2, gamma = 0, colsample_bytree = 1,min_child_weight = 3,subsample = 1)
+
+xgb_final  <- train(
+log(SalePrice) ~ .,
+all[train_idx,],
+method = "xgbTree",
+tuneGrid = xgbGrid,
+trControl = myControl
+)
+```
+
+```{r,eval=F}
+meta_y2 = data.frame(matrix(ncol=10, nrow=length(test_idx)))
+
+xgbGrid <- expand.grid(nrounds = 500, eta = 0.1,max_depth = 2, gamma = 0, colsample_bytree = 1,min_child_weight = 3,subsample = 1)
+
+for (i in 1:length(myFolds)){
+        folds = myFolds[[i]]
+        xgb <- train(
+                log(SalePrice) ~ .,
+                all[folds,],
+                method = 'xgbTree',
+                tuneGrid = xgbGrid
+                )
+        meta_y2[,i] <- predict(xgb,newdata = all[test_idx,])
+}
+
+meta_y2 <- rowMeans(meta_y2)
+```
+
+```{r,eval=F}
+meta_x <- cbind(lm_final$pred[,c(1,2)],xgb_final$pred[,c(1,2)])
+lm_blender <- lm(obs ~ pred,meta_x)
+rmse(meta_x$obs,predict(lm_blender,meta_x))
+```
+
+```{r,eval=F}
+meta_y1 <- data.frame(obs = NA, pred = meta_y1)
+meta_y2 <- data.frame(obs = NA, pred = meta_y2)
+output1 <- predict(lm_blender,meta_y1)
+output2 <- predict(lm_blender,meta_y2)
+output <- exp((output1 + output2)/2)
+```
+
+---------------------------------------------------------------------
+Stacking using CaretEnsemble
+
+```{r,eval=F}
+set.seed(123)
+
+bestmodels <- caretList(
+                    #x = dummy_all[train_idx,-203], 
+                    #x=all[train_idx,-64],
+                    #y = log(all$SalePrice[train_idx]),
+                    log(SalePrice)~.,data=all[train_idx],
+                    trControl=myControl,
+                    preProcess = c('center','scale','zv'),
+                    tuneList = list(
+                glmnet=caretModelSpec(method="glmnet",tuneGrid=expand.grid(alpha = 0.7, lambda = 0.005)),
+                xgbTree=caretModelSpec(method="xgbTree",tuneGrid=expand.grid(nrounds = 500, eta = 0.05,max_depth = 3, gamma = 0, colsample_bytree = 1,min_child_weight = 2,subsample = 0.5)),
+                svm = caretModelSpec(method='svmLinear',tuneGrid=expand.grid(C = 0.3))
+                )
+)
+
+bestresults <- resamples(bestmodels)
+summary(bestresults)
+modelCor(bestresults)
+```
+
+
+```{r,eval=F}
+set.seed(123)
+myFolds <- createFolds(all$SalePrice[train_idx], k = 12,returnTrain=T) # 10 folds cv
+
+stackControl <- trainControl(method="cv", index = myFolds, savePredictions=TRUE)
+
+stack_model <- caretStack(bestmodels,method="lm",metric="RMSE",trControl=stackControl)
+
+print(stack_model)
+```
+
+```{r,eval=F}
+pred_train = exp(predict(stack_model,all[train_idx]))
+pred_test = exp(predict(stack_model,all[test_idx]))
+qplot(x = pred_train,y = all$SalePrice[train_idx],alpha = 0.5,ylab = 'Actual SalePrice',xlab = 'Stacking Prediction') + geom_smooth(se = F,method = 'lm')
+#RMSE(pred,log(all$SalePrice[train_idx]))
+```
+
+```{r,eval=F}
+# Create model_list
+model_list <- c(xgb, lm, svm_lk, rf)
+
+# Pass model_list to resamples(): resamples
+resamples <- resamples(model_list)
+
+# Summarize the results
+summary(resamples)
+
+modelCor(resamples)
+```
+
+```{r}
+bwplot(resamples,metric = 'RMSE')
+xyplot(resamples,metric = 'RMSE')
+```
+
+
+## Output
+```{r,eval=F}
+output <- data.frame(Id = test_idx + 2,SalePrice = pred_test)
+write.csv(output, file = 'output.csv', row.names = F)
+```
